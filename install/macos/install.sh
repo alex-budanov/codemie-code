@@ -3,6 +3,68 @@ set -euo pipefail
 
 PACKAGE_NAME="@codemieai/code"
 MINIMUM_NODE_MAJOR="20"
+
+# Return 0 if the given binary exists, runs, and reports Node.js >= min_major.
+node_meets_min() {
+  local binary="$1" min="$2"
+  [ -x "$binary" ] || return 1
+  local ver major
+  ver=$("$binary" --version 2>/dev/null | sed 's/v//')
+  major=$(printf '%s' "$ver" | cut -d. -f1)
+  [ -n "$major" ] && [ "$major" -ge "$min" ] 2>/dev/null
+}
+
+# Search version-manager directories for a Node.js binary meeting MINIMUM_NODE_MAJOR.
+# Prints the absolute path on success; prints nothing on failure.
+# Phase 1: active/default version (per manager). Phase 2: highest installed >= minimum.
+find_versioned_node() {
+  local min="$MINIMUM_NODE_MAJOR"
+
+  # ── nvm ──────────────────────────────────────────────────────────────────
+  # Phase 1: active version from ~/.nvm/alias/default
+  local nvm_default="$HOME/.nvm/alias/default"
+  if [ -f "$nvm_default" ]; then
+    local ver
+    ver=$(cat "$nvm_default")
+    # Skip alias strings like "lts/*" — require version-like prefix
+    case "$ver" in
+      v[0-9]*|[0-9]*)
+        ver=$(printf '%s' "$ver" | sed 's/^v//')
+        local p="$HOME/.nvm/versions/node/v$ver/bin/node"
+        if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+        ;;
+    esac
+  fi
+  # Phase 2: all nvm versions — ls -rd gives reverse-lexicographic (newest major first for v2x)
+  for p in $(ls -rd "$HOME"/.nvm/versions/node/v*/bin/node 2>/dev/null); do
+    if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+  done
+
+  # ── fnm ──────────────────────────────────────────────────────────────────
+  # Phase 1: active version via symlink
+  local fnm_alias="$HOME/.fnm/aliases/default"
+  if [ -L "$fnm_alias" ]; then
+    local ver
+    ver=$(readlink "$fnm_alias" | xargs basename)
+    local p="$HOME/.fnm/node-versions/$ver/installation/bin/node"
+    if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+  fi
+  # Phase 2: all fnm versions
+  for p in $(ls -rd "$HOME"/.fnm/node-versions/v*/installation/bin/node 2>/dev/null); do
+    if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+  done
+
+  # ── asdf ─────────────────────────────────────────────────────────────────
+  for p in $(ls -rd "$HOME"/.asdf/installs/nodejs/*/bin/node 2>/dev/null); do
+    if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+  done
+
+  # ── volta ─────────────────────────────────────────────────────────────────
+  for p in $(ls -rd "$HOME"/.volta/tools/image/node/*/bin/node 2>/dev/null); do
+    if node_meets_min "$p" "$min"; then printf '%s' "$p"; return; fi
+  done
+}
+
 REGISTRY_URL="${CODEMIE_REGISTRY_URL:-https://registry.npmjs.org/}"
 SCOPE_REGISTRY_URL="${CODEMIE_SCOPE_REGISTRY_URL:-}"
 INSTALL_MODE="${CODEMIE_INSTALL_MODE:-auto}"
@@ -11,6 +73,10 @@ PACKAGE_VERSION="${CODEMIE_PACKAGE_VERSION:-}"
 
 status() {
   printf '%-18s %s\n' "$1:" "$2"
+}
+
+status_error() {
+  printf '%-18s %s\n' "Error:" "$1" >&2
 }
 
 command_path() {
@@ -34,6 +100,15 @@ NODE_PATH="$(command_path node)"
 NPM_PATH="$(command_path npm)"
 NODE_MAJOR="$(node_major)"
 
+# Fallback: probe version-manager directories
+if [ -z "$NODE_PATH" ]; then
+  NODE_PATH=$(find_versioned_node)
+  if [ -n "$NODE_PATH" ]; then
+    status 'Node' "found via version manager: $NODE_PATH"
+    NODE_MAJOR="$("$NODE_PATH" --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
+  fi
+fi
+
 echo "CodeMie installer diagnostics"
 status "OS" "$(uname -s)-$(uname -m)"
 status "Shell" "POSIX"
@@ -42,7 +117,7 @@ status "npm" "${NPM_PATH:-not found}"
 status "Registry" "$REGISTRY_URL"
 
 if [ -z "$NODE_PATH" ] || [ "$NODE_MAJOR" -lt "$MINIMUM_NODE_MAJOR" ]; then
-  echo "Node.js $MINIMUM_NODE_MAJOR or newer is required. Install Node.js using the approved enterprise method, then rerun this installer." >&2
+  status_error "Node.js ${MINIMUM_NODE_MAJOR}+ not found. Probed: PATH, nvm, fnm, asdf, volta. Install Node.js v${MINIMUM_NODE_MAJOR}+ or source your version manager before running this script."
   exit 1
 fi
 
