@@ -132,7 +132,7 @@ function Find-VersionedNode {
   }
   # nvm-windows: all versions sorted descending
   $nvmAll = Get-Item (Join-Path $nvmRoot 'v*\node.exe') -ErrorAction SilentlyContinue |
-    Sort-Object { [System.Version]($_.Directory.Name.TrimStart('v')) } -Descending
+    Sort-Object { try { [System.Version]($_.Directory.Name.TrimStart('v')) } catch { [System.Version]'0.0.0' } } -Descending
   foreach ($item in $nvmAll) { $candidates.Add($item.FullName) }
 
   # fnm: active version first (resolve alias symlink)
@@ -151,13 +151,13 @@ function Find-VersionedNode {
     Sort-Object {
       $ver = $_.FullName.Split([IO.Path]::DirectorySeparatorChar) |
              Where-Object { $_ -match '^v\d+\.' } | Select-Object -First 1
-      [System.Version]($ver.TrimStart('v'))
+      try { [System.Version]($ver.TrimStart('v')) } catch { [System.Version]'0.0.0' }
     } -Descending
   foreach ($item in $fnmAll) { $candidates.Add($item.FullName) }
 
   # volta: all versions sorted descending
   $voltaAll = Get-Item (Join-Path $env:LOCALAPPDATA 'Volta\tools\image\node\*\node.exe') -ErrorAction SilentlyContinue |
-    Sort-Object { [System.Version]($_.Directory.Name) } -Descending
+    Sort-Object { try { [System.Version]($_.Directory.Name) } catch { [System.Version]'0.0.0' } } -Descending
   foreach ($item in $voltaAll) { $candidates.Add($item.FullName) }
 
   # scoop and chocolatey: single known paths
@@ -212,6 +212,12 @@ if (-not $NodePath) {
   if ($NodePath) {
     Write-Status 'Node' "found via version manager: $NodePath"
   }
+}
+
+# Co-locate npm from the same directory as node (version managers don't add npm to PATH either)
+if ($NodePath -and -not $NpmPath) {
+    $npmCandidate = Join-Path (Split-Path $NodePath) 'npm.cmd'
+    if (Test-Path $npmCandidate) { $NpmPath = $npmCandidate }
 }
 
 $NodeMajor = Get-NodeMajor $NodePath

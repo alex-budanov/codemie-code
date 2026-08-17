@@ -109,6 +109,12 @@ if [ -z "$NODE_PATH" ]; then
   fi
 fi
 
+# Co-locate npm from the same bin directory as node (version managers don't add npm to PATH either)
+if [ -n "$NODE_PATH" ]; then
+  _npm_candidate="$(dirname "$NODE_PATH")/npm"
+  [ -x "$_npm_candidate" ] && NPM_PATH="$_npm_candidate"
+fi
+
 echo "CodeMie installer diagnostics"
 status "OS" "$(uname -s)-$(uname -m)"
 status "Shell" "POSIX"
