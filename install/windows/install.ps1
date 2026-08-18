@@ -117,6 +117,67 @@ function Add-UserPath {
   Write-Status 'PATH update' 'user PATH updated; open a new terminal'
 }
 
+function Find-VersionedNode {
+  param([int]$MinMajor = $MinimumNodeMajor)
+  $candidates = [System.Collections.Generic.List[string]]::new()
+
+  # nvm-windows: active version first (read from settings.txt)
+  $nvmRoot = Join-Path $env:APPDATA "nvm"
+  $nvmSettings = Join-Path $nvmRoot "settings.txt"
+  if (Test-Path $nvmSettings) {
+    $line = Get-Content $nvmSettings | Where-Object { $_ -match '^\s*node\s*:\s*(\S+)' } | Select-Object -First 1
+    if ($line -match '^\s*node\s*:\s*v?(\S+)') {
+      $candidates.Add((Join-Path $nvmRoot "v$($Matches[1])\node.exe"))
+    }
+  }
+  # nvm-windows: all versions sorted descending
+  $nvmAll = Get-Item (Join-Path $nvmRoot 'v*\node.exe') -ErrorAction SilentlyContinue |
+    Sort-Object { try { [System.Version]($_.Directory.Name.TrimStart('v')) } catch { [System.Version]'0.0.0' } } -Descending
+  foreach ($item in $nvmAll) { $candidates.Add($item.FullName) }
+
+  # fnm: active version first (resolve alias symlink)
+  $fnmAlias = Join-Path $env:LOCALAPPDATA 'fnm\aliases\default'
+  if (Test-Path $fnmAlias) {
+    try {
+      $target = (Get-Item $fnmAlias -Force).Target
+      if ($target) {
+        $ver = Split-Path -Leaf $target
+        $candidates.Add((Join-Path $env:LOCALAPPDATA "fnm\node-versions\$ver\installation\bin\node.exe"))
+      }
+    } catch {}
+  }
+  # fnm: all versions sorted descending
+  $fnmAll = Get-Item (Join-Path $env:LOCALAPPDATA 'fnm\node-versions\v*\installation\bin\node.exe') -ErrorAction SilentlyContinue |
+    Sort-Object {
+      $ver = $_.FullName.Split([IO.Path]::DirectorySeparatorChar) |
+             Where-Object { $_ -match '^v\d+\.' } | Select-Object -First 1
+      try { [System.Version]($ver.TrimStart('v')) } catch { [System.Version]'0.0.0' }
+    } -Descending
+  foreach ($item in $fnmAll) { $candidates.Add($item.FullName) }
+
+  # volta: all versions sorted descending
+  $voltaAll = Get-Item (Join-Path $env:LOCALAPPDATA 'Volta\tools\image\node\*\node.exe') -ErrorAction SilentlyContinue |
+    Sort-Object { try { [System.Version]($_.Directory.Name) } catch { [System.Version]'0.0.0' } } -Descending
+  foreach ($item in $voltaAll) { $candidates.Add($item.FullName) }
+
+  # scoop and chocolatey: single known paths
+  $candidates.Add((Join-Path $env:USERPROFILE 'scoop\apps\nodejs\current\node.exe'))
+  $candidates.Add('C:\ProgramData\chocolatey\lib\nodejs.install\tools\node.exe')
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($path in $candidates) {
+    if (-not $seen.Add($path)) { continue }
+    if (-not (Test-Path $path -PathType Leaf)) { continue }
+    try {
+      $ver = & $path --version 2>$null
+      if ($ver -match 'v(\d+)' -and [int]$Matches[1] -ge $MinMajor) {
+        return $path
+      }
+    } catch {}
+  }
+  return $null
+}
+
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
   $InstallRoot = Join-Path $env:LOCALAPPDATA 'CodeMie'
 }
@@ -146,6 +207,19 @@ if (-not $NodePath) {
   }
 }
 
+if (-not $NodePath) {
+  $NodePath = Find-VersionedNode
+  if ($NodePath) {
+    Write-Status 'Node' "found via version manager: $NodePath"
+  }
+}
+
+# Co-locate npm from the same directory as node (version managers don't add npm to PATH either)
+if ($NodePath -and -not $NpmPath) {
+    $npmCandidate = Join-Path (Split-Path $NodePath) 'npm.cmd'
+    if (Test-Path $npmCandidate) { $NpmPath = $npmCandidate }
+}
+
 $NodeMajor = Get-NodeMajor $NodePath
 
 Write-Host 'CodeMie installer diagnostics'
@@ -159,7 +233,7 @@ Write-Status 'Git' $(if ($GitPath) { $GitPath } else { 'not found' })
 Write-Status 'Registry' $RegistryUrl
 
 if (-not $NodePath -or $NodeMajor -lt $MinimumNodeMajor) {
-  throw "Node.js $MinimumNodeMajor or newer is required. Install the corporate-approved Node.js package, then rerun this installer."
+  throw "Node.js $MinimumNodeMajor+ not found. Probed: PATH, Program Files, nvm-windows, fnm, volta, scoop, chocolatey. Install Node.js v$MinimumNodeMajor+ or add your Node.js directory to PATH, then re-run this script."
 }
 
 if (-not $NpmPath) {
